@@ -218,6 +218,12 @@ select:focus-visible {
   border-color: rgba(239, 182, 74, 0.75);
 }
 
+.trade-audience {
+  align-items: center;
+  color: #dce8e5;
+  display: flex;
+}
+
 .join-row {
   display: grid;
   gap: 10px;

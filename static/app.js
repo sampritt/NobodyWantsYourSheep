@@ -43,7 +43,6 @@ let ui = {
   plenty: [],
   monopoly: "brick",
   tradeMode: "player",
-  tradeTarget: "",
   tradeGive: Object.fromEntries(RESOURCES.map((resource) => [resource, 0])),
   tradeReceive: Object.fromEntries(RESOURCES.map((resource) => [resource, 0])),
   bankGive: "brick",
@@ -577,17 +576,28 @@ function renderActionRail() {
 
   const offers = state.trade_offers
     .map((offer) => {
-      const from = state.players.find((player) => player.id === offer.from);
-      const to = state.players.find((player) => player.id === offer.to);
+      const from = playerById(offer.from);
+      const eligibleTo = offer.eligible_to || (offer.to ? [offer.to] : []);
+      const declinedBy = offer.declined_by || [];
+      const canAnswer = eligibleTo.includes(clientId) && !declinedBy.includes(clientId);
+      const canCancel = offer.from === clientId;
+      const toLabel = offer.to ? playerNames([offer.to]) : "the table";
       const give = bundleText(offer.give);
       const receive = bundleText(offer.receive);
       return `<div class="offer">
-        <strong>${escapeHtml(from.username)}</strong> offers ${give} to ${escapeHtml(to.username)} for ${receive}.
+        <strong>${escapeHtml(from?.username || "A player")}</strong> offers ${give} to ${escapeHtml(toLabel)} for ${receive}.
         ${
-          offer.to === clientId
+          canAnswer
             ? `<div class="offer-actions">
                 <button class="btn btn-primary" data-action="respond-trade" data-id="${offer.id}" data-accept="true">Accept</button>
-                <button class="btn btn-secondary" data-action="respond-trade" data-id="${offer.id}" data-accept="false">Decline</button>
+                <button class="btn btn-secondary" data-action="respond-trade" data-id="${offer.id}" data-accept="false">${offer.to ? "Decline" : "Pass"}</button>
+              </div>`
+            : ""
+        }
+        ${
+          canCancel
+            ? `<div class="offer-actions">
+                <button class="btn btn-secondary" data-action="cancel-trade" data-id="${offer.id}">Cancel offer</button>
               </div>`
             : ""
         }
@@ -708,19 +718,17 @@ function renderStealModal() {
 }
 
 function renderTradeModal() {
-  const targets =
+  const recipients =
     state.active_player_id === clientId
       ? state.players.filter((player) => player.id !== clientId)
       : state.players.filter((player) => player.id === state.active_player_id);
-  if (!targets.some((target) => target.id === ui.tradeTarget)) {
-    ui.tradeTarget = targets[0]?.id || "";
-  }
+  const audience = playerNames(recipients.map((player) => player.id)) || "No eligible players";
   const rate = state.legal.harbor_rates[ui.bankGive];
   return `
     <div class="modal-backdrop" data-action="close-modal">
       <section class="modal" data-modal-panel>
         <h2>Trade table</h2>
-        <p>Trade with the bank at your best harbor rate, or propose an exchange with another settler.</p>
+        <p>Trade with the bank at your best harbor rate, or propose an exchange at the table.</p>
         <div class="action-grid">
           <button class="btn ${ui.tradeMode === "player" ? "btn-primary" : "btn-secondary"}" data-action="trade-mode" data-kind="player">Player trade</button>
           <button class="btn ${ui.tradeMode === "bank" ? "btn-primary" : "btn-secondary"}" data-action="trade-mode" data-kind="bank">Maritime trade</button>
@@ -728,10 +736,8 @@ function renderTradeModal() {
         ${
           ui.tradeMode === "player"
             ? `<div class="field">
-                <label>Trade with</label>
-                <select class="input" data-change="trade-target">
-                  ${targets.map((player) => `<option value="${player.id}" ${player.id === ui.tradeTarget ? "selected" : ""}>${escapeHtml(player.username)}</option>`).join("")}
-                </select>
+                <label>Offer goes to</label>
+                <div class="input trade-audience">${escapeHtml(audience)}</div>
               </div>
               <div class="trade-columns">
                 <div class="trade-side"><h3>You give</h3>${renderCounters("trade-give", ui.tradeGive, state.you.resources)}</div>
@@ -739,7 +745,7 @@ function renderTradeModal() {
               </div>
               <div class="modal-actions">
                 <button class="btn btn-secondary" data-action="close-modal">Cancel</button>
-                <button class="btn btn-primary" data-action="submit-trade">Send offer</button>
+                <button class="btn btn-primary" data-action="submit-trade" ${recipients.length ? "" : "disabled"}>Send offer</button>
               </div>`
             : `<div class="trade-columns">
                 <div class="field">
@@ -844,6 +850,17 @@ function bundleText(bundle) {
     .join(", ");
 }
 
+function playerById(playerId) {
+  return state.players.find((player) => player.id === playerId);
+}
+
+function playerNames(playerIds) {
+  return playerIds
+    .map((playerId) => playerById(playerId)?.username)
+    .filter(Boolean)
+    .join(", ");
+}
+
 root.addEventListener("input", (event) => {
   if (event.target.name === "username") {
     ui.username = event.target.value;
@@ -856,7 +873,6 @@ root.addEventListener("input", (event) => {
 
 root.addEventListener("change", (event) => {
   const action = event.target.dataset.change;
-  if (action === "trade-target") ui.tradeTarget = event.target.value;
   if (action === "bank-give") {
     ui.bankGive = event.target.value;
     if (ui.bankReceive === ui.bankGive) {
@@ -945,7 +961,6 @@ root.addEventListener("click", (event) => {
       return;
     }
     emitGame("offer_trade", {
-      target_id: ui.tradeTarget,
       give: ui.tradeGive,
       receive: ui.tradeReceive,
     });
@@ -956,6 +971,8 @@ root.addEventListener("click", (event) => {
     ui.modal = null;
   } else if (action === "respond-trade") {
     emitGame("respond_trade", { offer_id: target.dataset.id, accept: target.dataset.accept === "true" });
+  } else if (action === "cancel-trade") {
+    emitGame("cancel_trade", { offer_id: target.dataset.id });
   } else if (action === "play-development") {
     playDevelopment(target.dataset.kind);
   } else if (action === "plenty-choice") {

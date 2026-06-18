@@ -270,12 +270,19 @@ def maritime_trade(game: CatanGame, client_id: str, payload: dict[str, Any]):
 @socketio.on("offer_trade")
 @game_event
 def offer_trade(game: CatanGame, client_id: str, payload: dict[str, Any]):
+    raw_target = payload.get("target_id")
     game.offer_trade(
         client_id,
-        str(payload["target_id"]),
+        str(raw_target) if raw_target else None,
         payload.get("give", {}),
         payload.get("receive", {}),
     )
+
+
+@socketio.on("cancel_trade")
+@game_event
+def cancel_trade(game: CatanGame, client_id: str, payload: dict[str, Any]):
+    game.cancel_trade(client_id, str(payload["offer_id"]))
 
 
 @socketio.on("respond_trade")

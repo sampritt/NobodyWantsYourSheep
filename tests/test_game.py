@@ -159,17 +159,100 @@ def test_domestic_trade_requires_active_player_and_exchanges_atomically():
     game = started_game()
     finish_setup(game)
     set_action_turn(game, "p1")
-    game._player("p1").resources["brick"] = 1
-    game._player("p2").resources["ore"] = 1
-    p2_brick_before = game._player("p2").resources["brick"]
+    game._player("p1").resources = Counter({"brick": 1})
+    game._player("p2").resources = Counter({"ore": 1})
 
     offer_id = game.offer_trade("p2", "p1", {"ore": 1}, {"brick": 1})
     game.respond_trade("p1", offer_id, True)
 
     assert game._player("p1").resources["ore"] == 1
-    assert game._player("p2").resources["brick"] == p2_brick_before + 1
+    assert game._player("p2").resources["brick"] == 1
     with pytest.raises(GameError):
         game.offer_trade("p2", "p3", {"brick": 1}, {"ore": 1})
+
+
+def test_broadcast_trade_first_accept_exchanges_and_closes_offer():
+    game = started_game()
+    finish_setup(game)
+    set_action_turn(game, "p1")
+    game._player("p1").resources = Counter({"brick": 1})
+    game._player("p2").resources = Counter({"ore": 1})
+    game._player("p3").resources = Counter({"ore": 1})
+
+    offer_id = game.offer_trade("p1", None, {"brick": 1}, {"ore": 1})
+
+    assert game.trade_offers[offer_id]["to"] is None
+    assert game.trade_offers[offer_id]["eligible_to"] == ["p2", "p3"]
+    game.respond_trade("p2", offer_id, True)
+
+    assert offer_id not in game.trade_offers
+    assert game._player("p1").resources["brick"] == 0
+    assert game._player("p1").resources["ore"] == 1
+    assert game._player("p2").resources["ore"] == 0
+    assert game._player("p2").resources["brick"] == 1
+    assert game._player("p3").resources == Counter({"ore": 1})
+    with pytest.raises(GameError, match="no longer available"):
+        game.respond_trade("p3", offer_id, True)
+
+
+def test_broadcast_trade_passes_do_not_cancel_until_everyone_passes():
+    game = started_game()
+    finish_setup(game)
+    set_action_turn(game, "p1")
+    game._player("p1").resources = Counter({"brick": 1})
+    game._player("p2").resources = Counter({"ore": 1})
+    game._player("p3").resources = Counter({"ore": 1})
+
+    offer_id = game.offer_trade("p1", None, {"brick": 1}, {"ore": 1})
+    game.respond_trade("p2", offer_id, False)
+
+    assert offer_id in game.trade_offers
+    assert game.trade_offers[offer_id]["declined_by"] == ["p2"]
+    with pytest.raises(GameError, match="already passed"):
+        game.respond_trade("p2", offer_id, True)
+
+    game.respond_trade("p3", offer_id, False)
+
+    assert offer_id not in game.trade_offers
+
+
+def test_broadcast_trade_stale_resources_are_handled_at_acceptance():
+    game = started_game()
+    finish_setup(game)
+    set_action_turn(game, "p1")
+    game._player("p1").resources = Counter({"brick": 1})
+    game._player("p2").resources = Counter()
+    game._player("p3").resources = Counter({"ore": 1})
+
+    offer_id = game.offer_trade("p1", None, {"brick": 1}, {"ore": 1})
+
+    with pytest.raises(GameError, match="requested resources"):
+        game.respond_trade("p2", offer_id, True)
+    assert offer_id in game.trade_offers
+
+    game._player("p1").resources.clear()
+    with pytest.raises(GameError, match="proposer no longer has"):
+        game.respond_trade("p3", offer_id, True)
+
+    assert offer_id not in game.trade_offers
+    assert game._player("p3").resources == Counter({"ore": 1})
+
+
+def test_trade_offer_can_be_cancelled_by_proposer_only():
+    game = started_game()
+    finish_setup(game)
+    set_action_turn(game, "p1")
+    game._player("p1").resources = Counter({"brick": 1})
+
+    offer_id = game.offer_trade("p1", None, {"brick": 1}, {"ore": 1})
+
+    with pytest.raises(GameError, match="Only the proposer"):
+        game.cancel_trade("p2", offer_id)
+    assert offer_id in game.trade_offers
+
+    game.cancel_trade("p1", offer_id)
+
+    assert offer_id not in game.trade_offers
 
 
 def test_development_card_cannot_be_played_when_bought_and_knight_returns_to_roll():

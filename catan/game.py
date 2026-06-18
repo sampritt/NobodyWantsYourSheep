@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import secrets
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -74,6 +75,7 @@ class CatanGame:
         self.longest_road_holder: str | None = None
         self.largest_army_holder: str | None = None
         self.trade_offers: dict[str, dict[str, Any]] = {}
+        self._trade_lock = threading.RLock()
         self.log: list[str] = []
         self.winner_id: str | None = None
         self.last_roll: tuple[int, int] | None = None
@@ -563,67 +565,138 @@ class CatanGame:
                 cleaned[resource] = amount
         return cleaned
 
+    def _eligible_trade_recipients(
+        self, player_id: str, target_id: str | None
+    ) -> tuple[list[str], bool]:
+        normalized_target = target_id.strip() if target_id else ""
+        if normalized_target.lower() in {"all", "broadcast", "table"}:
+            normalized_target = ""
+
+        if normalized_target:
+            if player_id == normalized_target:
+                raise GameError("Choose another player.")
+            self._player(normalized_target)
+            if self.active_player_id not in (player_id, normalized_target):
+                raise GameError("Trades must include the active player.")
+            return [normalized_target], False
+
+        if player_id == self.active_player_id:
+            recipients = [player.id for player in self.players if player.id != player_id]
+        elif self.active_player_id:
+            recipients = [self.active_player_id]
+        else:
+            recipients = []
+
+        if not recipients:
+            raise GameError("No players can receive this trade.")
+        return recipients, len(recipients) > 1
+
     def offer_trade(
         self,
         player_id: str,
-        target_id: str,
+        target_id: str | None,
         give: dict[str, Any],
         receive: dict[str, Any],
     ) -> str:
         self._require_phase("action")
-        if player_id == target_id:
-            raise GameError("Choose another player.")
-        if self.active_player_id not in (player_id, target_id):
-            raise GameError("Trades must include the active player.")
-        proposer = self._player(player_id)
-        target = self._player(target_id)
-        offered = self._clean_bundle(give)
-        requested = self._clean_bundle(receive)
-        if not offered or not requested:
-            raise GameError("A trade must exchange resources in both directions.")
-        if set(offered).intersection(requested):
-            raise GameError("The same resource cannot be on both sides of a trade.")
-        if any(proposer.resources[resource] < amount for resource, amount in offered.items()):
-            raise GameError("You do not hold the resources offered.")
-        offer_id = secrets.token_hex(4)
-        self.trade_offers[offer_id] = {
-            "id": offer_id,
-            "from": player_id,
-            "to": target_id,
-            "give": dict(offered),
-            "receive": dict(requested),
-        }
-        self.log.append(f"{proposer.username} offered a trade to {target.username}.")
-        return offer_id
+        with self._trade_lock:
+            proposer = self._player(player_id)
+            recipients, broadcast = self._eligible_trade_recipients(player_id, target_id)
+            offered = self._clean_bundle(give)
+            requested = self._clean_bundle(receive)
+            if not offered or not requested:
+                raise GameError("A trade must exchange resources in both directions.")
+            if set(offered).intersection(requested):
+                raise GameError("The same resource cannot be on both sides of a trade.")
+            if any(
+                proposer.resources[resource] < amount
+                for resource, amount in offered.items()
+            ):
+                raise GameError("You do not hold the resources offered.")
+
+            offer_id = secrets.token_hex(4)
+            self.trade_offers[offer_id] = {
+                "id": offer_id,
+                "from": player_id,
+                "to": None if broadcast else recipients[0],
+                "eligible_to": recipients,
+                "declined_by": [],
+                "give": dict(offered),
+                "receive": dict(requested),
+            }
+            if broadcast:
+                self.log.append(f"{proposer.username} offered a trade to the table.")
+            else:
+                target = self._player(recipients[0])
+                self.log.append(f"{proposer.username} offered a trade to {target.username}.")
+            return offer_id
+
+    def cancel_trade(self, player_id: str, offer_id: str) -> None:
+        self._require_phase("action")
+        with self._trade_lock:
+            offer = self.trade_offers.get(offer_id)
+            if not offer:
+                raise GameError("That trade offer is no longer available.")
+            if player_id != offer["from"]:
+                raise GameError("Only the proposer can cancel this offer.")
+            proposer = self._player(player_id)
+            del self.trade_offers[offer_id]
+            self.log.append(f"{proposer.username} cancelled a trade offer.")
 
     def respond_trade(self, player_id: str, offer_id: str, accept: bool) -> None:
         self._require_phase("action")
-        offer = self.trade_offers.get(offer_id)
-        if not offer:
-            raise GameError("That trade offer is no longer available.")
-        if player_id != offer["to"]:
-            raise GameError("Only the recipient can answer this offer.")
-        proposer = self._player(offer["from"])
-        recipient = self._player(offer["to"])
-        if accept:
-            if any(
-                proposer.resources[resource] < amount
-                for resource, amount in offer["give"].items()
-            ) or any(
-                recipient.resources[resource] < amount
-                for resource, amount in offer["receive"].items()
-            ):
-                raise GameError("One side no longer has the offered resources.")
-            for resource, amount in offer["give"].items():
-                proposer.resources[resource] -= amount
-                recipient.resources[resource] += amount
-            for resource, amount in offer["receive"].items():
-                recipient.resources[resource] -= amount
-                proposer.resources[resource] += amount
-            self.log.append(f"{recipient.username} accepted {proposer.username}'s trade.")
-        else:
+        with self._trade_lock:
+            offer = self.trade_offers.get(offer_id)
+            if not offer:
+                raise GameError("That trade offer is no longer available.")
+            eligible_to = list(
+                offer.get("eligible_to")
+                or ([offer["to"]] if offer.get("to") else [])
+            )
+            if player_id not in eligible_to:
+                raise GameError("Only an eligible recipient can answer this offer.")
+
+            proposer = self._player(offer["from"])
+            recipient = self._player(player_id)
+            declined_by = set(offer.get("declined_by", []))
+            if player_id in declined_by:
+                raise GameError("You already passed on this offer.")
+
+            if accept:
+                if any(
+                    proposer.resources[resource] < amount
+                    for resource, amount in offer["give"].items()
+                ):
+                    del self.trade_offers[offer_id]
+                    self.log.append(f"{proposer.username}'s trade offer expired.")
+                    raise GameError("The proposer no longer has the offered resources.")
+                if any(
+                    recipient.resources[resource] < amount
+                    for resource, amount in offer["receive"].items()
+                ):
+                    raise GameError("You do not hold the requested resources.")
+                for resource, amount in offer["give"].items():
+                    proposer.resources[resource] -= amount
+                    recipient.resources[resource] += amount
+                for resource, amount in offer["receive"].items():
+                    recipient.resources[resource] -= amount
+                    proposer.resources[resource] += amount
+                del self.trade_offers[offer_id]
+                self.log.append(f"{recipient.username} accepted {proposer.username}'s trade.")
+                return
+
             self.log.append(f"{recipient.username} declined {proposer.username}'s trade.")
-        del self.trade_offers[offer_id]
+            if offer.get("to"):
+                del self.trade_offers[offer_id]
+                return
+
+            declined_by.add(player_id)
+            offer["declined_by"] = [
+                recipient_id for recipient_id in eligible_to if recipient_id in declined_by
+            ]
+            if declined_by.issuperset(eligible_to):
+                del self.trade_offers[offer_id]
+                self.log.append(f"No one accepted {proposer.username}'s trade.")
 
     def end_turn(self, player_id: str) -> None:
         self._require_active(player_id)
@@ -637,7 +710,8 @@ class CatanGame:
         self.phase = "roll"
         self.last_roll = None
         self.played_development_this_turn = False
-        self.trade_offers.clear()
+        with self._trade_lock:
+            self.trade_offers.clear()
         self.log.append(f"It is now {self._player(self.active_player_id).username}'s turn.")
         self._check_win()
 
